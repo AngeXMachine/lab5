@@ -1,66 +1,83 @@
-import nltk
-nltk.download('punkt')
-nltk.download('wordnet')
-from pyspark import SparkContext, SparkConf
+from pyspark import SparkConf, SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf
 from pyspark.sql.types import StringType
 import re
 import nltk
 from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-
-# Настройка Spark
-conf = SparkConf().setAppName("TextProcessing").setMaster("local[*]")
+import os
+from pyspark.sql import Row
+# Установите ресурсы NLTK
+nltk.download("punkt")
+nltk.download('punkt_tab')
+nltk.download("stopwords")
+nltk.download("wordnet")
+# Настройка Spark-сессии
+conf = SparkConf().setAppName("Text Processing").setMaster("local[*]")
 sc = SparkContext(conf=conf)
-spark = SparkSession.builder.appName("TextPreprocessing").getOrCreate()
+spark = SparkSession.builder.config(conf=conf).getOrCreate()
 
-print("Spark session created!")
+print("Spark Session создана")
 
-# Функции для предобработки текста
+
+
+# Путь к текстовым файлам
+data_dir = "/workspaces/lab5/workspace/"
+texts = []
+for file_name in os.listdir(data_dir):
+    if file_name.endswith(".txt"):
+        with open(os.path.join(data_dir, file_name), "r", encoding="utf-8") as file:
+            texts.append(file.read())
+from pyspark.sql.functions import udf
+
+
+
+
+lemmatizer = WordNetLemmatizer()
+
+# Функции обработки текста
 def clean_text(text):
-    text = re.sub(r"[^\w\s]", "", text)  # Убираем пунктуацию
+    text = re.sub(r"[^a-zA-Z\s]", "", text)
     return text.lower()
 
 def tokenize_text(text):
-    return " ".join(word_tokenize(text))
+    russian_stopwords  = set(stopwords.words("russian"))
+    tokens = word_tokenize(text, language="russian")
+    tokens = [token for token in tokens if token.isalnum()]  # Удаляем пунктуацию
+    tokens = [token for token in tokens if token.lower() not in russian_stopwords]  # Удаляем стоп-слова
+    return tokens
 
-lemmatizer = WordNetLemmatizer()
-def lemmatize_text(text):
-    tokens = word_tokenize(text)
-    return " ".join([lemmatizer.lemmatize(token) for token in tokens])
-
-def classify_text(text):
-    if "ужас" in text:
-        return "horror"
-    elif "море" in text:
-        return "adventure"
-    else:
-        return "unknown"
+def lemmatize_text(tokens):
+    return " ".join([lemmatizer.lemmatize(word) for word in tokens if word not in stop_words])
 
 # Создание UDF
-clean_udf = udf(clean_text, StringType())
-tokenize_udf = udf(tokenize_text, StringType())
-lemmatize_udf = udf(lemmatize_text, StringType())
-classify_udf = udf(classify_text, StringType())
+clean_text_udf = udf(clean_text, StringType())
+tokenize_text_udf = udf(lambda text: " ".join(tokenize_text(text)), StringType())
+lemmatize_text_udf = udf(lambda text: lemmatize_text(word_tokenize(text)), StringType())
 
-# Загрузка данных
-data = spark.read.text("11-16.txt")
-df = data.withColumnRenamed("value", "original_text")
+# Преобразование текстов в DataFrame
+rows = [Row(text=text) for text in texts]
+df = spark.createDataFrame(rows)
 
-# Предобработка текста
-df = df.withColumn("cleaned_text", clean_udf(df.original_text))
-df = df.withColumn("tokenized_text", tokenize_udf(df.cleaned_text))
-df = df.withColumn("lemmatized_text", lemmatize_udf(df.tokenized_text))
+# Добавление колонок с обработанным текстом
+df = df.withColumn("cleaned_text", clean_text_udf(df["text"]))
+df = df.withColumn("tokenized_text", tokenize_text_udf(df["cleaned_text"]))
+df = df.withColumn("lemmatized_text", lemmatize_text_udf(df["cleaned_text"]))
 
-# Кластеризация
-df = df.withColumn("genre", classify_udf(df.cleaned_text))
-
-# Сохранение результатов
-df.write.format("csv").save("processed_texts.csv")
-
-# Преобразование DataFrame в RDD (если нужно)
+df.show(truncate=False)
 rdd = df.rdd
 print(rdd.take(5))
+def cluster_by_length(text):
+    length = len(text.split())
+    if length < 50:
+        return "short"
+    elif length < 150:
+        return "medium"
+    else:
+        return "long"
 
-print("Processing complete! Results saved to 'processed_texts.csv'")
+cluster_udf = udf(cluster_by_length, StringType())
+df = df.withColumn("cluster", cluster_udf(df["lemmatized_text"]))
+df.show(truncate=False)
+df.write.csv("output/text_clusters.csv", header=True)
